@@ -2,102 +2,81 @@ const Sales = require("../models/Sales");
 const Product = require("../models/Product");
 const Customer = require("../models/Customer");
 
-// GET aggregated sales analytics
+// GET Sales analytics
 exports.getSales = async (req, res) => {
   try {
-    // Optional date filter
     const { startDate, endDate } = req.query;
-    const match = {};
-    if (startDate && endDate) {
-      match.reportDate = {
+
+    const sales = await Sales.find({
+      reportDate: {
         $gte: new Date(startDate),
         $lte: new Date(endDate),
-      };
-    }
-
-    // Aggregate sales
-    const totalRevenueResult = await Sales.aggregate([
-      { $match: match },
-      { $group: { _id: null, totalRevenue: { $sum: "$totalRevenue" }, totalOrders: { $sum: 1 } } },
-    ]);
-
-    const totalRevenue = totalRevenueResult[0]?.totalRevenue || 0;
-    const totalOrders = totalRevenueResult[0]?.totalOrders || 0;
-    const avgOrderValue = totalOrders ? totalRevenue / totalOrders : 0;
-
-    // Top 5 products by revenue
-    const topProducts = await Sales.aggregate([
-      { $match: match },
-      { $group: { _id: "$product", revenue: { $sum: "$totalRevenue" } } },
-      { $sort: { revenue: -1 } },
-      { $limit: 5 },
-      {
-        $lookup: {
-          from: "products",
-          localField: "_id",
-          foreignField: "_id",
-          as: "productDetails",
-        },
       },
-      { $unwind: "$productDetails" },
-      {
-        $project: {
-          _id: 0,
-          productId: "$_id",
-          name: "$productDetails.name",
-          revenue: 1,
-        },
-      },
-    ]);
+    }).populate("product customer");
 
-    // Top 5 customers by revenue
-    const topCustomers = await Sales.aggregate([
-      { $match: match },
-      { $group: { _id: "$customer", revenue: { $sum: "$totalRevenue" } } },
-      { $sort: { revenue: -1 } },
-      { $limit: 5 },
-      {
-        $lookup: {
-          from: "customers",
-          localField: "_id",
-          foreignField: "_id",
-          as: "customerDetails",
-        },
-      },
-      { $unwind: "$customerDetails" },
-      {
-        $project: {
-          _id: 0,
-          customerId: "$_id",
-          name: "$customerDetails.name",
-          revenue: 1,
-        },
-      },
-    ]);
+    // Total Revenue
+    const totalRevenue = sales.reduce((sum, s) => sum + s.totalRevenue, 0);
 
-    // Region-wise sales
-    const regionSales = await Sales.aggregate([
-      { $match: match },
-      {
-        $lookup: {
-          from: "customers",
-          localField: "customer",
-          foreignField: "_id",
-          as: "customerDetails",
-        },
-      },
-      { $unwind: "$customerDetails" },
-      { $group: { _id: "$customerDetails.region", revenue: { $sum: "$totalRevenue" } } },
-      { $project: { _id: 0, region: "$_id", revenue: 1 } },
-    ]);
+    // Average Order Value
+    const avgOrderValue = sales.length ? totalRevenue / sales.length : 0;
 
-    res.json({
-      totalRevenue,
-      avgOrderValue,
-      topProducts,
-      topCustomers,
-      regionSales,
+    // Top Products
+    const topProductsMap = {};
+    sales.forEach((s) => {
+      const key = s.product._id;
+      topProductsMap[key] = topProductsMap[key] || { name: s.product.name, revenue: 0 };
+      topProductsMap[key].revenue += s.totalRevenue;
     });
+    const topProducts = Object.values(topProductsMap).sort((a, b) => b.revenue - a.revenue).slice(0, 5);
+
+    // Top Customers
+    const topCustomersMap = {};
+    sales.forEach((s) => {
+      const key = s.customer._id;
+      topCustomersMap[key] = topCustomersMap[key] || { name: s.customer.name, revenue: 0 };
+      topCustomersMap[key].revenue += s.totalRevenue;
+    });
+    const topCustomers = Object.values(topCustomersMap).sort((a, b) => b.revenue - a.revenue).slice(0, 5);
+
+    // Region-wise revenue
+    const regionMap = {};
+    sales.forEach((s) => {
+      const key = s.customer.region;
+      regionMap[key] = regionMap[key] || 0;
+      regionMap[key] += s.totalRevenue;
+    });
+    const regionSales = Object.entries(regionMap).map(([region, revenue]) => ({ region, revenue }));
+
+    res.json({ totalRevenue, avgOrderValue, topProducts, topCustomers, regionSales });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// POST Add new sale
+exports.addSale = async (req, res) => {
+  try {
+    const { productId, customerId, quantity } = req.body;
+    const product = await Product.findById(productId);
+    const customer = await Customer.findById(customerId);
+    if (!product || !customer) return res.status(404).json({ error: "Product or Customer not found" });
+
+    const sale = new Sales({
+      product: product._id,
+      customer: customer._id,
+      quantity,
+      totalRevenue: quantity * product.price,
+      reportDate: new Date(),
+    });
+
+    await sale.save();
+
+    // Emit real-time update
+    const io = req.app.get("io");
+    io.emit("salesUpdated");
+
+    res.status(201).json(sale);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Server error" });
