@@ -15,7 +15,7 @@ const { getSales, addSale } = require("./controllers/salesController");
 
 // Routes
 app.get("/api/sales", getSales);
-app.post("/api/sales", addSale); // For adding new sale
+app.post("/api/sales", addSale);
 
 // MongoDB Connection
 mongoose
@@ -31,11 +31,9 @@ const server = app.listen(PORT, () => {
   console.log(`⚡ Server running on port ${PORT}`);
 });
 
-// Socket.io for real-time updates
-const io = require("socket.io")(server, {
-  cors: { origin: "*" },
-});
-app.set("io", io); // Make io accessible in controllers
+// Socket.io
+const io = require("socket.io")(server, { cors: { origin: "*" } });
+app.set("io", io);
 
 io.on("connection", (socket) => {
   console.log("🔌 New client connected");
@@ -44,13 +42,14 @@ io.on("connection", (socket) => {
   });
 });
 
-// ✅ Serve React frontend build in production
+// Serve React frontend
 if (process.env.NODE_ENV === "production") {
   const frontendPath = path.join(__dirname, "../frontend/build");
   app.use(express.static(frontendPath));
 
-  // Catch-all route for React (Express 5.x compatible)
-  app.get("/*", (req, res) => {
+  // Catch-all route for React (works in Express 4.x)
+  app.get("*", (req, res, next) => {
+    if (req.path.startsWith("/api")) return next(); // skip API calls
     res.sendFile(path.join(frontendPath, "index.html"));
   });
 }
